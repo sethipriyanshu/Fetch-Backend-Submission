@@ -1,1 +1,0 @@
-package points_controller
