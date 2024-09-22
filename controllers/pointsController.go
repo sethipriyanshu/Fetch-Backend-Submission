@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 var client *mongo.Client
@@ -41,20 +43,44 @@ func SpendPoints(c echo.Context) error {
 
 	var spendRequest map[string]int
 	if err := c.Bind(&spendRequest); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
+		return c.String(http.StatusBadRequest, "Invalid request payload")
 	}
 
 	pointsToSpend := spendRequest["points"]
 
 	collection := client.Database("myapp_db").Collection("transactions")
-	transactions, err := models.GetTransactions(ctx, collection)
+
+	// Fetch transactions sorted by timestamp (oldest first)
+	findOptions := options.Find().SetSort(bson.D{{"timestamp", 1}})
+	cur, err := collection.Find(ctx, bson.M{}, findOptions)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch transactions"})
+		return c.String(http.StatusInternalServerError, "Failed to fetch transactions")
+	}
+	defer cur.Close(ctx)
+
+	var transactions []models.Transaction
+	if err = cur.All(ctx, &transactions); err != nil {
+		return c.String(http.StatusInternalServerError, "Failed to parse transactions")
+	}
+
+	// Calculate total available points for each payer
+	payerPoints := make(map[string]int)
+	for _, transaction := range transactions {
+		payerPoints[transaction.Payer] += transaction.Points
+	}
+
+	// Check if points to spend exceed available points
+	totalAvailablePoints := 0
+	for _, points := range payerPoints {
+		totalAvailablePoints += points
+	}
+	if pointsToSpend > totalAvailablePoints {
+		return c.String(http.StatusBadRequest, "Insufficient points")
 	}
 
 	spendResults, err := models.SpendPoints(ctx, collection, transactions, pointsToSpend)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return c.String(http.StatusInternalServerError, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, spendResults)
